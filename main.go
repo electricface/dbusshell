@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -22,6 +23,7 @@ var conn *dbus.Conn
 var connDesc string
 var dbusName string
 var dbusPath = "/"
+var dbusOldPath = "/"
 var dbusInterface string
 var logger *log.Logger
 var logFile string
@@ -139,7 +141,7 @@ func main() {
 	})
 
 	shell.AddCmd(&ishell.Cmd{
-		Name: "ls_services",
+		Name: "ls-services",
 		Func: func(c *ishell.Context) {
 			if conn == nil {
 				c.Println("conn is nil")
@@ -165,10 +167,20 @@ func main() {
 	})
 
 	shell.AddCmd(&ishell.Cmd{
-		Name:    "change_service",
+		Name:    "change-service",
 		Aliases: []string{"cs"},
 		Func: func(c *ishell.Context) {
 			if len(c.Args) == 1 {
+				hasOwner, err := getNameHasOwner(c.Args[0])
+				if err != nil {
+					c.Err(err)
+					return
+				}
+				if !hasOwner {
+					c.Println("name has not owner")
+					return
+				}
+
 				dbusName = c.Args[0]
 				dbusPath = "/"
 			}
@@ -225,7 +237,17 @@ func main() {
 	shell.AddCmd(&ishell.Cmd{
 		Name: "cd",
 		Func: func(c *ishell.Context) {
-			newPath := getNewPath(c.Args)
+			var newPath string
+			if len(c.Args) == 1 && c.Args[0] == "-" {
+				newPath = dbusOldPath
+			} else {
+				newPath = getNewPath(c.Args)
+			}
+
+			if !dbus.ObjectPath(newPath).IsValid() {
+				c.Println("path is invalid")
+				return
+			}
 
 			node, err := getNodeWithPath(newPath)
 			if err != nil {
@@ -239,7 +261,21 @@ func main() {
 			}
 
 			c.Println("cd to", newPath)
+			dbusOldPath = dbusPath
 			dbusPath = newPath
+
+			// auto select interface
+			for _, ifc := range node.Interfaces {
+				if dbusInterface == ifc.Name {
+					return
+				}
+				if !isStandardDBusInterface(ifc.Name) {
+					dbusInterface = ifc.Name
+					c.Println("auto select interface:", dbusInterface)
+					return
+				}
+			}
+			dbusInterface = ""
 		},
 		Completer: func(args []string) (result []string) {
 			logger.Println("cd completer args:", args)
@@ -295,7 +331,7 @@ func main() {
 	})
 
 	shell.AddCmd(&ishell.Cmd{
-		Name: "get_all",
+		Name: "get-all",
 		Func: func(c *ishell.Context) {
 			if conn == nil {
 				c.Println("conn is nil")
@@ -310,7 +346,14 @@ func main() {
 				c.Err(err)
 				return
 			}
-			for propName, propValue := range props {
+			var propNames []string
+			for propName := range props {
+				propNames = append(propNames, propName)
+			}
+			sort.Strings(propNames)
+
+			for _, propName := range propNames {
+				propValue := props[propName]
 				c.Print(propName + ": ")
 				c.Println(formatVariant(propValue))
 			}
@@ -351,7 +394,7 @@ func main() {
 	})
 
 	shell.AddCmd(&ishell.Cmd{
-		Name: "help_types",
+		Name: "help-types",
 		Func: func(c *ishell.Context) {
 			c.Print(`Base Types:
 bool b
@@ -376,6 +419,17 @@ a{ss} -> map[string]string
 	err := os.Remove(logFile)
 	if err != nil {
 		log.Printf("warning: failed to remove logFile %q: %v\n", logFile, err)
+	}
+}
+
+func isStandardDBusInterface(ifcName string) bool {
+	switch ifcName {
+	case "org.freedesktop.DBus.Introspectable",
+		"org.freedesktop.DBus.Properties",
+		"org.freedesktop.DBus.Peer":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -429,14 +483,31 @@ func getInterface() (*introspect.Interface, error) {
 	return nil, errors.New("not found interface")
 }
 
-func getNode() (*introspect.Node, error) {
-	return getNodeWithPath(dbusPath)
+func validDBusName(name string) bool {
+	if name == "" {
+		return false
+	}
+	parts := strings.Split(name, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func getNodeWithPath(path string) (*introspect.Node, error) {
 	if conn == nil {
 		return nil, errors.New("conn is nil")
 	}
+
+	if !validDBusName(dbusName) {
+		return nil, errors.New("dbusName is invalid")
+	}
+
 	obj := conn.Object(dbusName, dbus.ObjectPath(path))
 	var xmlStr string
 	err := obj.Call("org.freedesktop.DBus.Introspectable.Introspect",
@@ -450,6 +521,10 @@ func getNodeWithPath(path string) (*introspect.Node, error) {
 		return nil, err
 	}
 	return &node, nil
+}
+
+func getNode() (*introspect.Node, error) {
+	return getNodeWithPath(dbusPath)
 }
 
 func getInterfaces() (result []string) {
@@ -481,4 +556,12 @@ func getServices() (result []string) {
 		}
 	}
 	return
+}
+
+func getNameHasOwner(name string) (bool, error) {
+	if conn == nil {
+		return false, errors.New("conn is nil")
+	}
+	ofd := ofdbus.NewDBus(conn)
+	return ofd.NameHasOwner(0, name)
 }
