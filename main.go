@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"os/exec"
+
 	"github.com/abiosoft/ishell"
 	ofdbus "github.com/linuxdeepin/go-dbus-factory/org.freedesktop.dbus"
 	"pkg.deepin.io/lib/dbus1"
@@ -20,13 +22,21 @@ import (
 )
 
 var conn *dbus.Conn
-var connDesc string
 var dbusName string
 var dbusPath = "/"
 var dbusOldPath = "/"
 var dbusInterface string
 var logger *log.Logger
 var logFile string
+
+var dbusType int
+
+const (
+	dbusTypeNil = iota
+	dbusTypeSession
+	dbusTypeSystem
+	dbusTypeOther
+)
 
 func init() {
 	logFile = fmt.Sprintf("/tmp/dbusshell-%d", os.Getpid())
@@ -119,7 +129,7 @@ func main() {
 						c.Err(err)
 						return
 					}
-					connDesc = "session bus"
+					dbusType = dbusTypeSession
 				} else if arg0 == "system" || arg0 == "y" {
 					var err error
 					conn, err = dbus.SystemBus()
@@ -127,12 +137,12 @@ func main() {
 						c.Err(err)
 						return
 					}
-					connDesc = "system bus"
+					dbusType = dbusTypeSession
 				}
 			}
 
 			if conn != nil {
-				c.Println(connDesc)
+				c.Println(getConnDesc())
 				c.Printf("names: %v\n", conn.Names())
 			} else {
 				c.Println("conn is nil")
@@ -240,6 +250,9 @@ func main() {
 			var newPath string
 			if len(c.Args) == 1 && c.Args[0] == "-" {
 				newPath = dbusOldPath
+			} else if len(c.Args) == 1 && c.Args[0] == "$" {
+				// service to path
+				newPath = "/" + strings.Replace(dbusName, ".", "/", -1)
 			} else {
 				newPath = getNewPath(c.Args)
 			}
@@ -370,7 +383,7 @@ func main() {
 	shell.AddCmd(&ishell.Cmd{
 		Name: "info",
 		Func: func(c *ishell.Context) {
-			c.Println(connDesc)
+			c.Println(getConnDesc())
 			c.Println("service:", dbusName)
 			c.Println("path:", dbusPath)
 			c.Println("interface:", dbusInterface)
@@ -384,12 +397,88 @@ func main() {
 		Func: func(c *ishell.Context) {
 			if len(c.Args) == 1 {
 				arg0 := c.Args[0]
+
+				// check interface
+				var ifcOk bool
+				for _, ifc := range getInterfaces() {
+					if ifc == arg0 {
+						ifcOk = true
+						break
+					}
+				}
+				if !ifcOk {
+					c.Println("invalid interface")
+					return
+				}
+
 				dbusInterface = arg0
 				c.Println("select interface:", arg0)
 			}
 		},
 		Completer: func(args []string) []string {
 			return getInterfaces()
+		},
+	})
+
+	shell.AddCmd(&ishell.Cmd{
+		Name: "call",
+		Func: func(c *ishell.Context) {
+			c.Printf("call args: %#v\n", c.Args)
+			connTypeOpt, err := getGDBusConnTypeOpt()
+			if err != nil {
+				c.Err(err)
+				return
+			}
+
+			var args = []string{
+				"call", connTypeOpt,
+				"-d", dbusName,
+				"-o", dbusPath,
+				"-m", dbusInterface + "." + c.Args[0],
+			}
+			args = append(args, c.Args[1:]...)
+			cmd := exec.Command("gdbus", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err = cmd.Run()
+			if err != nil {
+				c.Err(err)
+			}
+			return
+		},
+		Completer: func(args []string) (result []string) {
+			ifc, err := getInterface()
+			if err != nil {
+				return nil
+			}
+
+			for _, method := range ifc.Methods {
+				result = append(result, method.Name)
+			}
+
+			return
+		},
+	})
+
+	shell.AddCmd(&ishell.Cmd{
+		Name: "tmux-buffer",
+		Func: func(c *ishell.Context) {
+			cmd := exec.Command("tmux", "show-buffer")
+			out, err := cmd.Output()
+			if err != nil {
+				c.Err(err)
+			}
+			if json.Valid(out) {
+				var buf bytes.Buffer
+				err = json.Indent(&buf, out, "", "  ")
+				if err != nil {
+					c.Err(err)
+					return
+				}
+				c.Printf("%s\n", buf.Bytes())
+			} else {
+				c.Printf("%s\n", out)
+			}
 		},
 	})
 
@@ -419,6 +508,36 @@ a{ss} -> map[string]string
 	err := os.Remove(logFile)
 	if err != nil {
 		log.Printf("warning: failed to remove logFile %q: %v\n", logFile, err)
+	}
+}
+
+func getConnDesc() string {
+	switch dbusType {
+	case dbusTypeNil:
+		return "conn is nil"
+	case dbusTypeSession:
+		return "session bus"
+	case dbusTypeSystem:
+		return "system bus"
+	case dbusTypeOther:
+		return "other bus"
+	default:
+		return "unknown bus"
+	}
+}
+
+func getGDBusConnTypeOpt() (string, error) {
+	switch dbusType {
+	case dbusTypeNil:
+		return "", errors.New("conn is nil")
+	case dbusTypeSession:
+		return "-e", nil
+	case dbusTypeSystem:
+		return "-y", nil
+	case dbusTypeOther:
+		return "", errors.New("not supported")
+	default:
+		return "", errors.New("unknown dbus type")
 	}
 }
 
