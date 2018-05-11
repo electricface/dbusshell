@@ -137,7 +137,7 @@ func main() {
 						c.Err(err)
 						return
 					}
-					dbusType = dbusTypeSession
+					dbusType = dbusTypeSystem
 				}
 			}
 
