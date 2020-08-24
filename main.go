@@ -16,9 +16,9 @@ import (
 	"os/exec"
 
 	"github.com/abiosoft/ishell"
+	"github.com/godbus/dbus"
+	"github.com/godbus/dbus/introspect"
 	ofdbus "github.com/linuxdeepin/go-dbus-factory/org.freedesktop.dbus"
-	"pkg.deepin.io/lib/dbus1"
-	"pkg.deepin.io/lib/dbus1/introspect"
 )
 
 var conn *dbus.Conn
